@@ -161,10 +161,13 @@ class TemporalHistoryIndex:
 
 
 def make_out_dir(args):
+    save_suffix = getattr(args, "save", "fair")
+    save_suffix = "" if save_suffix in ("", "fair") else f"_{save_suffix}"
     name = (
         f"nsq{args.ns_q}_ns{args.ns_seed}_tpr{args.train_predict_ratio:g}"
         f"_h{args.n_hidden}_ly{args.n_layers}_his{args.train_history_len}"
         f"_hr{args.history_rate:g}_lr{args.lr:g}"
+        f"{save_suffix}"
     )
     return osp.join("results_tirgn_fair", args.dataset, f"seed{args.seed}", name)
 
@@ -359,10 +362,11 @@ def evaluate_split(
                 all_quads, local_start, global_idx, num_nodes, num_rels, use_cuda, args, build_sub_graph
             )
             raw_t = int(eval_raw_times[local_idx])
+            model_t = int(snap[0, 3]) if len(snap) else 0
             for batch, neg_arr, neg_mask in collect_eval_batch(snap[:, :3], raw_t, neg_sampler, split_name, args.eval_batch_size):
                 if len(batch) == 0:
                     continue
-                t_col = np.full((len(batch), 1), raw_t, dtype=np.int64)
+                t_col = np.full((len(batch), 1), model_t, dtype=np.int64)
                 batch_quad = np.hstack((batch.astype(np.int64, copy=False), t_col))
                 tail_vocab, rel_vocab = history_index.make_vocab(torch, batch_quad, global_idx, device)
                 batch_tensor = torch.from_numpy(batch_quad).long().to(device)
@@ -480,7 +484,7 @@ def run(args):
             build_sub_graph,
         )
         train_time_total += log["train_time_s"]
-        do_val = epoch % int(args.evaluate_every) == 0 or epoch == int(args.n_epochs)
+        do_val = epoch > 1 and ((epoch - 1) % int(args.evaluate_every) == 0)
         if do_val:
             val_metrics, _ = evaluate_split(
                 args,
@@ -668,7 +672,7 @@ def parse_args():
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--grad-norm", type=float, default=1.0)
     parser.add_argument("--evaluate-every", type=int, default=1)
-    parser.add_argument("--patience", type=int, default=20)
+    parser.add_argument("--patience", type=int, default=9999)
     parser.add_argument("--tolerance", type=float, default=1e-8)
     parser.add_argument("--lr-scheduler", type=str, default="none", choices=("none", "step"))
     parser.add_argument("--lr-step-size", type=int, default=50)
