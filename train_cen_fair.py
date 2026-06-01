@@ -722,7 +722,7 @@ def parse_args():
     parser.add_argument("--train_predict_ratio", type=float, default=0.0)
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--eval_batch_size", type=int, default=256)
+    parser.add_argument("--eval_batch_size", type=int, default=128)
     parser.add_argument("--disable-cudnn", action="store_true", default=True)
     parser.add_argument("--enable-cudnn", dest="disable_cudnn", action="store_false")
 

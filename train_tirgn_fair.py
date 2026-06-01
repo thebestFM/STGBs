@@ -414,6 +414,9 @@ def make_scheduler(args, optimizer):
 
 def run(args):
     torch, RecurrentRGCN, build_sub_graph, read_triplets = import_tirgn()
+    if getattr(args, "disable_cudnn", True):
+        torch.backends.cudnn.enabled = False
+        print("[TiRGN-Fair] disabled cuDNN backend for TiRGN decoder stability.", flush=True)
     set_random_seed(args.seed)
     data = load_datasets(
         args.dataset,
@@ -635,6 +638,8 @@ def parse_args():
     parser.add_argument("--ns_seed", type=int, default=42)
     parser.add_argument("--train_predict_ratio", type=float, default=0.0)
     parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--disable-cudnn", action="store_true", default=True)
+    parser.add_argument("--enable-cudnn", dest="disable_cudnn", action="store_false")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--eval_batch_size", type=int, default=256)
 

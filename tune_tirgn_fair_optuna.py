@@ -33,6 +33,7 @@ def sample_trial_args(cli, trial):
         ns_seed=cli.ns_seed,
         train_predict_ratio=cli.train_predict_ratio,
         gpu=cli.gpu,
+        disable_cudnn=cli.disable_cudnn,
         batch_size=1,
         eval_batch_size=cli.eval_batch_size,
         test=False,
@@ -130,6 +131,8 @@ def parse_args():
     parser.add_argument("--ns_seed", type=int, default=42)
     parser.add_argument("--train_predict_ratio", type=float, default=0.0)
     parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--disable-cudnn", action="store_true", default=True)
+    parser.add_argument("--enable-cudnn", dest="disable_cudnn", action="store_false")
     parser.add_argument("--n-trials", type=int, default=20)
     parser.add_argument("--n-epochs", type=int, default=50)
     parser.add_argument("--evaluate-every", type=int, default=1)
