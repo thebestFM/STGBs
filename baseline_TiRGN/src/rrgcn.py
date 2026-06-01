@@ -58,7 +58,7 @@ class RecurrentRGCN(nn.Module):
                  num_hidden_layers=1, dropout=0, self_loop=False, skip_connect=False, layer_norm=False, input_dropout=0,
                  hidden_dropout=0, feat_dropout=0, aggregation='cat', weight=1, discount=0, angle=0, use_static=False,
                  entity_prediction=False, relation_prediction=False, use_cuda=False,
-                 gpu = 0, analysis=False, add_inverse=True):
+                 gpu = 0, analysis=False, add_inverse=True, allocate_time_linears=True):
         super(RecurrentRGCN, self).__init__()
 
         self.decoder_name = decoder_name
@@ -89,8 +89,12 @@ class RecurrentRGCN(nn.Module):
         self.emb_rel = None
         self.gpu = gpu
         self.sin = torch.sin
-        self.linear_0 = nn.Linear(num_times, 1)
-        self.linear_1 = nn.Linear(num_times, self.h_dim - 1)
+        if allocate_time_linears:
+            self.linear_0 = nn.Linear(num_times, 1)
+            self.linear_1 = nn.Linear(num_times, self.h_dim - 1)
+        else:
+            self.linear_0 = nn.Identity()
+            self.linear_1 = nn.Identity()
         self.tanh = nn.Tanh()
         self.use_cuda = None
 
@@ -329,7 +333,6 @@ class RecurrentRGCN(nn.Module):
         score_h = score_global
         score_h = F.softmax(score_h, dim=1)
         return score_h
-
 
 
 

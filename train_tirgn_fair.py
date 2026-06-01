@@ -78,13 +78,17 @@ def format_bytes(value):
 
 
 def snapshot_to_quad(snapshot):
-    events, _, t_orig = snapshot
-    t_col = np.full((len(events), 1), int(t_orig), dtype=np.int64)
+    events, t_norm, _ = snapshot
+    t_col = np.full((len(events), 1), int(t_norm), dtype=np.int64)
     return np.hstack((events.astype(np.int64, copy=False), t_col))
 
 
 def make_quad_snapshots(snapshot_list):
     return [snapshot_to_quad(s) for s in snapshot_list]
+
+
+def snapshot_raw_times(snapshot_list):
+    return [int(t_orig) for _, _, t_orig in snapshot_list]
 
 
 def infer_time_interval(quad_snapshots):
@@ -209,6 +213,11 @@ def build_model(
     all_quads = train_quads + val_quads + test_quads
     time_interval = infer_time_interval(all_quads)
     num_times = infer_num_times(all_quads, time_interval)
+    print(
+        f"[TiRGN-Fair] initializing model with time_interval={time_interval} "
+        f"num_times={num_times} allocate_time_linears=0",
+        flush=True,
+    )
     num_static_rels, num_words, static_graph = load_static_graph(
         args, data, num_nodes, use_cuda, torch, build_sub_graph, read_triplets
     )
@@ -246,6 +255,7 @@ def build_model(
         gpu=args.gpu if use_cuda else torch.device("cpu"),
         analysis=args.run_analysis,
         add_inverse=False,
+        allocate_time_linears=False,
     )
     model.to(device)
     return model, static_graph, device, use_cuda, num_nodes, num_rels, time_interval, num_times
@@ -323,6 +333,7 @@ def evaluate_split(
     model,
     split_name,
     eval_quads,
+    eval_raw_times,
     all_quads,
     history_index,
     static_graph,
@@ -347,7 +358,7 @@ def evaluate_split(
             history_glist = build_history_graphs(
                 all_quads, local_start, global_idx, num_nodes, num_rels, use_cuda, args, build_sub_graph
             )
-            raw_t = int(snap[0, 3]) if len(snap) else 0
+            raw_t = int(eval_raw_times[local_idx])
             for batch, neg_arr, neg_mask in collect_eval_batch(snap[:, :3], raw_t, neg_sampler, split_name, args.eval_batch_size):
                 if len(batch) == 0:
                     continue
@@ -415,6 +426,8 @@ def run(args):
     train_quads = make_quad_snapshots(data["train_list"])
     val_quads = make_quad_snapshots(data["val_list"])
     test_quads = make_quad_snapshots(data["test_list"])
+    val_raw_times = snapshot_raw_times(data["val_list"])
+    test_raw_times = snapshot_raw_times(data["test_list"])
     all_quads = train_quads + val_quads + test_quads
     val_start = len(train_quads)
     test_start = len(train_quads) + len(val_quads)
@@ -474,6 +487,7 @@ def run(args):
                 model,
                 "val",
                 val_quads,
+                val_raw_times,
                 all_quads,
                 history_index,
                 static_graph,
@@ -527,6 +541,7 @@ def run(args):
         model,
         "val",
         val_quads,
+        val_raw_times,
         all_quads,
         history_index,
         static_graph,
@@ -544,6 +559,7 @@ def run(args):
         model,
         "test",
         test_quads,
+        test_raw_times,
         all_quads,
         history_index,
         static_graph,
@@ -682,6 +698,20 @@ def parse_args():
         raise ValueError("--n-epochs must be positive")
     if int(args.patience) <= 0:
         raise ValueError("--patience must be positive")
+    if int(args.n_hidden) <= 0:
+        raise ValueError("--n-hidden must be positive")
+    if int(args.n_bases) <= 0:
+        raise ValueError("--n-bases must be positive")
+    if bool(args.add_static_graph) and int(args.n_hidden) % int(args.n_bases) != 0:
+        raise ValueError(
+            "--add-static-graph uses TiRGN's RGCNBlockLayer, which requires "
+            "--n-hidden to be divisible by --n-bases; got "
+            f"n_hidden={args.n_hidden}, n_bases={args.n_bases}"
+        )
+    if int(args.train_history_len) <= 0 or int(args.test_history_len) <= 0:
+        raise ValueError("--train-history-len and --test-history-len must be positive")
+    if int(args.eval_batch_size) <= 0:
+        raise ValueError("--eval_batch_size must be positive")
     if args.encoder == "convgcn" and int(args.n_layers) > 2:
         raise ValueError(
             "TiRGN's original convgcn implementation supports --n-layers <= 2: "
