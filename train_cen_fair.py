@@ -482,6 +482,9 @@ def run_history_stage(
 def run(args):
     torch, RecurrentRGCNCEN, build_sub_graph = import_cen()
     set_random_seed(args.seed)
+    if args.disable_cudnn:
+        torch.backends.cudnn.enabled = False
+        print("[CEN-Fair] disabled cuDNN backend for CEN ConvTransE stability.", flush=True)
 
     data = load_datasets(
         args.dataset,
@@ -720,6 +723,8 @@ def parse_args():
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--eval_batch_size", type=int, default=256)
+    parser.add_argument("--disable-cudnn", action="store_true", default=True)
+    parser.add_argument("--enable-cudnn", dest="disable_cudnn", action="store_false")
 
     parser.add_argument("--encoder", type=str, default="uvrgcn")
     parser.add_argument("--decoder", type=str, default="convtranse")
