@@ -1,0 +1,58 @@
+{
+  "city_dir": "Santa_Barbara_CA",
+  "source_dynamic_edges": 118690,
+  "num_users": 10635,
+  "num_businesses": 2632,
+  "num_entities_user_business_disjoint": 13267,
+  "user_id_range": [
+    0,
+    10634
+  ],
+  "business_id_range": [
+    10635,
+    13266
+  ],
+  "num_relations": 6,
+  "relation2id": {
+    "review_1star": 0,
+    "review_2star": 1,
+    "review_3star": 2,
+    "review_4star": 3,
+    "review_5star": 4,
+    "tip": 5
+  },
+  "t0_original_timestamp": "2005-03-01 16:57:17",
+  "timestamp_unit": "seconds since t0_original_timestamp",
+  "timestamp_min": 0,
+  "timestamp_max": 532915197,
+  "unique_relative_timestamps": 118604,
+  "split_rows": {
+    "train": 83083,
+    "valid": 10623,
+    "test": 7637
+  },
+  "static_user_friend_edges_rows": 82020,
+  "static_user_friend_edges_dropped_missing_users": 0,
+  "business_geo_source": "Yelp business metadata: business_id maps dynamic review/tip events to business_nodes.csv latitude/longitude copied from business.json.",
+  "businesses_missing_geo": 0,
+  "first_event_check": {
+    "raw_user_id": "XCsZ3hWa_6oP1WkWvK7pmg",
+    "assigned_user_id": 0,
+    "raw_business_id": "U3grYFIeu6RgAAQgdriHww",
+    "assigned_business_id": 10635,
+    "expected_first_user_id": 0,
+    "expected_first_business_id": 10635,
+    "relative_ts": 0
+  },
+  "output_files": [
+    "train_events.csv",
+    "valid_events.csv",
+    "test_events.csv",
+    "static_user_friend_edges.csv",
+    "user_id_map.csv",
+    "business_id_map.csv",
+    "relation_id_map.csv",
+    "model_input_stats.json",
+    "README.md"
+  ]
+}
