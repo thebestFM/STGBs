@@ -414,10 +414,17 @@ def make_scheduler(args, optimizer):
 
 def run(args):
     torch, RecurrentRGCN, build_sub_graph, read_triplets = import_tirgn()
+    set_random_seed(args.seed)
     if getattr(args, "disable_cudnn", True):
         torch.backends.cudnn.enabled = False
-        print("[TiRGN-Fair] disabled cuDNN backend for TiRGN decoder stability.", flush=True)
-    set_random_seed(args.seed)
+        torch.backends.cudnn.benchmark = False
+        print(
+            f"[TiRGN-Fair] disabled cuDNN backend for TiRGN decoder stability "
+            f"(cudnn.enabled={torch.backends.cudnn.enabled}).",
+            flush=True,
+        )
+    else:
+        print(f"[TiRGN-Fair] cuDNN backend enabled={torch.backends.cudnn.enabled}.", flush=True)
     data = load_datasets(
         args.dataset,
         q=args.ns_q,
