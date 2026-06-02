@@ -167,10 +167,10 @@ def build_tidformer_data(tid, train_events, val_events, test_events, num_nodes):
     return node_raw_features, edge_rel_ids, full_data, train_data, val_data, test_data
 
 
-def get_neighbor_sampler(tid, data, strategy, time_scaling_factor, seed):
+def get_neighbor_sampler(tid, data, strategy, time_scaling_factor, seed, num_nodes=None):
     src_max = int(np.max(data.src_node_ids)) if len(data.src_node_ids) else 0
     dst_max = int(np.max(data.dst_node_ids)) if len(data.dst_node_ids) else 0
-    max_node_id = max(src_max, dst_max)
+    max_node_id = max(src_max, dst_max, int(num_nodes or 0))
     adj_list = [[] for _ in range(max_node_id + 1)]
     for src, dst, edge_id, ts in zip(data.src_node_ids, data.dst_node_ids, data.edge_ids, data.node_interact_times):
         adj_list[int(src)].append((int(dst), int(edge_id), float(ts)))
@@ -587,6 +587,7 @@ def run(args):
         args.sample_neighbor_strategy,
         args.time_scaling_factor,
         seed=0,
+        num_nodes=int(data["num_nodes"]),
     )
     args._full_neighbor_sampler = get_neighbor_sampler(
         tid,
@@ -594,6 +595,7 @@ def run(args):
         args.sample_neighbor_strategy,
         args.time_scaling_factor,
         seed=1,
+        num_nodes=int(data["num_nodes"]),
     )
     train_neg_sampler = tid.NegativeEdgeSampler(
         src_node_ids=train_data.src_node_ids,
