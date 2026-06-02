@@ -1,4 +1,5 @@
 import argparse
+import copy
 import os
 import os.path as osp
 import sys
@@ -177,6 +178,59 @@ def run(args):
     return metrics
 
 
+def tuning(args):
+    mem_modes = ["unlimited", "fixed_time_window"]
+    time_window_ratios = [0.01, 0.03, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 0.7]
+    results = []
+    best = None
+    for mem_mode in mem_modes:
+        ratios = [-1.0] if mem_mode == "unlimited" else time_window_ratios
+        for ratio in ratios:
+            trial_args = copy.deepcopy(args)
+            trial_args.tune_edgebank = False
+            trial_args.mem_mode = mem_mode
+            trial_args.time_window_ratio = float(ratio if mem_mode == "fixed_time_window" else 0.15)
+            print(
+                f"[EdgeBank-Tune] start mem_mode={trial_args.mem_mode} "
+                f"time_window_ratio={trial_args.time_window_ratio:g}",
+                flush=True,
+            )
+            metrics = run(trial_args)
+            record = {
+                "mem_mode": trial_args.mem_mode,
+                "time_window_ratio": float(trial_args.time_window_ratio),
+                "val_mrr": float(metrics["val_mrr"]),
+                "test_mrr": float(metrics["test_mrr"]),
+                "out_dir": make_out_dir(trial_args),
+            }
+            results.append(record)
+            if best is None or record["val_mrr"] > best["val_mrr"]:
+                best = record
+
+    tune_dir = osp.join("results_edgebank_fair", args.dataset, f"seed{args.seed}", "tuning")
+    os.makedirs(tune_dir, exist_ok=True)
+    summary = {
+        "format": "edgebank_tuning_v1",
+        "dataset": args.dataset,
+        "seed": int(args.seed),
+        "ns_q": int(args.ns_q),
+        "ns_seed": int(args.ns_seed),
+        "train_predict_ratio": float(args.train_predict_ratio),
+        "selection_metric": "val_mrr_strict",
+        "best": best,
+        "results": results,
+    }
+    save_metrics(tune_dir, summary)
+    print(
+        f"[EdgeBank-Tune] best mem_mode={best['mem_mode']} "
+        f"time_window_ratio={best['time_window_ratio']:g} "
+        f"val_mrr={best['val_mrr']:.6f} test_mrr={best['test_mrr']:.6f} "
+        f"saved -> {tune_dir}",
+        flush=True,
+    )
+    return summary
+
+
 def parse_args():
     parser = argparse.ArgumentParser("Fair EdgeBank trainer/evaluator for EAGLE protocols.")
     parser.add_argument("--dataset", type=str, required=True, choices=eagle_utils.SUPPORTED_DATASETS)
@@ -187,6 +241,7 @@ def parse_args():
     parser.add_argument("--eval_batch_size", type=int, default=200)
     parser.add_argument("--mem_mode", type=str, default="unlimited", choices=("unlimited", "fixed_time_window"))
     parser.add_argument("--time_window_ratio", type=float, default=0.15)
+    parser.add_argument("--tune-edgebank", action="store_true", default=False)
     args = parser.parse_args()
     if args.ns_q == 0 or args.ns_q < -1:
         raise ValueError("--ns_q must be -1 or a positive integer")
@@ -196,4 +251,8 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    run(parse_args())
+    parsed_args = parse_args()
+    if parsed_args.tune_edgebank:
+        tuning(parsed_args)
+    else:
+        run(parsed_args)
