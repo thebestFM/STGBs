@@ -242,7 +242,9 @@ def build_edge_features(args, df):
 
 def build_model(args, sthn):
     edge_predictor_configs = {
-        "dim_in_time": int(args.time_dims),
+        # Patch_Encoding outputs hidden_dims; official examples use hidden_dims == time_dims,
+        # so this mismatch is hidden there but appears when tuning them separately.
+        "dim_in_time": int(args.hidden_dims),
         "dim_in_node": int(args.node_feat_dims),
         "predict_class": 1,
     }
@@ -568,7 +570,7 @@ def parse_args():
     parser.add_argument("--max_edges", type=int, default=50)
     parser.add_argument("--window_size", type=int, default=5)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--neg_samples", type=int, default=1)
+    parser.add_argument("--neg_samples", type=int, choices=[1], default=1)
     parser.add_argument("--extra_neg_samples", type=int, default=5)
     parser.add_argument("--num_neighbors", type=int, default=50)
     parser.add_argument("--channel_expansion_factor", type=int, default=2)
