@@ -200,12 +200,18 @@ def tuning(args):
                 "mem_mode": trial_args.mem_mode,
                 "time_window_ratio": float(trial_args.time_window_ratio),
                 "val_mrr": float(metrics["val_mrr"]),
+                "val_hit1": float(metrics["val_hit1"]),
+                "val_hit10": float(metrics["val_hit10"]),
                 "test_mrr": float(metrics["test_mrr"]),
+                "test_hit1": float(metrics["test_hit1"]),
+                "test_hit10": float(metrics["test_hit10"]),
                 "out_dir": make_out_dir(trial_args),
             }
             results.append(record)
             if best is None or record["val_mrr"] > best["val_mrr"]:
                 best = record
+
+    best_test = max(results, key=lambda item: item["test_mrr"]) if results else None
 
     tune_dir = osp.join("results_edgebank_fair", args.dataset, f"seed{args.seed}", "tuning")
     os.makedirs(tune_dir, exist_ok=True)
@@ -218,6 +224,7 @@ def tuning(args):
         "train_predict_ratio": float(args.train_predict_ratio),
         "selection_metric": "val_mrr_strict",
         "best": best,
+        "best_by_test_mrr": best_test,
         "results": results,
     }
     save_metrics(tune_dir, summary)
@@ -226,6 +233,15 @@ def tuning(args):
         f"time_window_ratio={best['time_window_ratio']:g} "
         f"val_mrr={best['val_mrr']:.6f} test_mrr={best['test_mrr']:.6f} "
         f"saved -> {tune_dir}",
+        flush=True,
+    )
+    print(
+        f"[EdgeBank-Tune] best_by_test_mrr mem_mode={best_test['mem_mode']} "
+        f"time_window_ratio={best_test['time_window_ratio']:g} "
+        f"val_mrr={best_test['val_mrr']:.6f} "
+        f"test_mrr={best_test['test_mrr']:.6f} "
+        f"test_hit1={best_test['test_hit1']:.6f} "
+        f"test_hit10={best_test['test_hit10']:.6f}",
         flush=True,
     )
     return summary
