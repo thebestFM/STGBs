@@ -87,7 +87,18 @@ def learn_rule_chunk(
     output_dir,
 ):
     Temporal_Walk, Rule_Learner, _, _, _, _ = import_tlogic()
+    print(
+        f"[TLogic-Fair] learn chunk: build Temporal_Walk relations={len(relation_chunk)} "
+        f"events={len(train_data)}",
+        flush=True,
+    )
+    t_tw = time.perf_counter()
     temporal_walk = Temporal_Walk(train_data, inv_relation_id, transition_distr)
+    print(
+        f"[TLogic-Fair] learn chunk: Temporal_Walk ready relations={len(temporal_walk.edges)} "
+        f"elapsed={time.perf_counter() - t_tw:.1f}s",
+        flush=True,
+    )
     learner = Rule_Learner(
         edges=temporal_walk.edges,
         id2relation=None,
@@ -98,10 +109,28 @@ def learn_rule_chunk(
         for length in rule_lengths:
             t0 = time.perf_counter()
             before = sum(len(v) for v in learner.rules_dict.values())
-            for _ in range(int(num_walks)):
+            total_walks = int(num_walks)
+            progress_step = max(1, int(np.ceil(total_walks / 100.0)))
+            next_progress = progress_step
+            successful_walks = 0
+            for walk_idx in range(1, total_walks + 1):
                 walk_successful, walk = temporal_walk.sample_walk(int(length) + 1, int(rel))
                 if walk_successful:
+                    successful_walks += 1
                     learner.create_rule(walk)
+                while walk_idx >= next_progress or walk_idx == total_walks:
+                    current_rules = sum(len(v) for v in learner.rules_dict.values())
+                    print(
+                        f"[TLogic-Fair] learn relation={rel} length={length}: "
+                        f"walks {walk_idx}/{total_walks} "
+                        f"({100.0 * walk_idx / max(1, total_walks):.1f}%) "
+                        f"successful={successful_walks} new_rules={current_rules - before} "
+                        f"elapsed={time.perf_counter() - t0:.1f}s",
+                        flush=True,
+                    )
+                    if walk_idx >= total_walks:
+                        break
+                    next_progress += progress_step
             after = sum(len(v) for v in learner.rules_dict.values())
             print(
                 f"[TLogic-Fair] relation={rel} length={length} "
@@ -158,7 +187,17 @@ def learn_or_load_rules(args, train_data, num_rels, out_dir):
         if len(train_data) == 0:
             return {}, "", 0.0
         Temporal_Walk, _, _, _, _, _ = import_tlogic()
+        print(
+            f"[TLogic-Fair] learn rules: build relation index events={len(train_data)}",
+            flush=True,
+        )
+        t_tw = time.perf_counter()
         temporal_walk = Temporal_Walk(train_data, inv_relation_id, args.transition_distr)
+        print(
+            f"[TLogic-Fair] learn rules: relation index ready relations={len(temporal_walk.edges)} "
+            f"elapsed={time.perf_counter() - t_tw:.1f}s",
+            flush=True,
+        )
         all_relations = sorted(temporal_walk.edges)
         chunks = split_chunks(all_relations, args.num_processes)
         t0 = time.perf_counter()
@@ -235,10 +274,10 @@ def query_negatives(neg_sampler, split_name, query):
     )
 
 
-def candidate_scores_for_query(args, query, rules_dict, edges, ra, create_scores_array, num_nodes):
+def candidate_scores_for_query(args, query, rules_dict, edges, ra):
     cands_dict = [dict() for _ in range(1)]
     if int(query[1]) not in rules_dict:
-        return np.zeros(int(num_nodes), dtype=np.float32)
+        return {}
 
     dicts_idx = [0]
     for rule in rules_dict[int(query[1])]:
@@ -275,15 +314,18 @@ def candidate_scores_for_query(args, query, rules_dict, edges, ra, create_scores
             break
 
     if not cands_dict[0]:
-        return np.zeros(int(num_nodes), dtype=np.float32)
+        return {}
     scores = [1.0 - np.prod(1.0 - np.asarray(v, dtype=np.float64)) for v in cands_dict[0].values()]
-    noisy_or_cands = dict(
+    return dict(
         sorted(dict(zip(cands_dict[0].keys(), scores)).items(), key=lambda x: x[1], reverse=True)
     )
-    return create_scores_array(noisy_or_cands, num_nodes).astype(np.float32, copy=False)
 
 
-def evaluate_events(
+def lookup_scores(candidate_scores, node_ids):
+    return np.asarray([float(candidate_scores.get(int(node_id), 0.0)) for node_id in node_ids], dtype=np.float32)
+
+
+def evaluate_event_chunk(
     args,
     events,
     rules_dict,
@@ -292,22 +334,23 @@ def evaluate_events(
     num_nodes,
     split_name,
     measure_forward=False,
+    process_id=0,
+    split_first_query_ts=None,
 ):
-    _, _, _, ra, _, create_scores_array = import_tlogic()
+    _, _, _, ra, _, _ = import_tlogic()
     sums = {}
     sample_count = 0
     forward_time = 0.0
     if len(events) == 0:
-        metrics = finalize_metric_sums(sums)
-        metrics["mrr"] = metrics["mrr_strict"]
-        metrics["hit1"] = metrics["hit@1_strict"]
-        metrics["hit10"] = metrics["hit@10_strict"]
-        return metrics, {"forward_time_s": 0.0, "sample_count": 0}
+        return {"sums": sums, "forward_time_s": 0.0, "sample_count": 0, "wall_time_s": 0.0}
 
     neg_sampler = args._negative_sampler
-    first_query_ts = int(events[0, 3])
+    first_query_ts = int(split_first_query_ts if split_first_query_ts is not None else events[0, 3])
     cur_ts = None
     edges = {}
+    wall_t0 = time.perf_counter()
+    next_progress = max(1, int(np.ceil(len(events) / 100.0)))
+    progress_step = next_progress
 
     for start in range(0, len(events), int(args.eval_batch_size)):
         batch = np.ascontiguousarray(events[start : start + int(args.eval_batch_size)], dtype=np.int64)
@@ -320,8 +363,12 @@ def evaluate_events(
         for i, query in enumerate(batch):
             if int(query[3]) != cur_ts:
                 cur_ts = int(query[3])
-                if measure_forward:
-                    t0 = time.perf_counter()
+                t0 = time.perf_counter()
+                print(
+                    f"[TLogic-Fair] eval {split_name} process={process_id}: "
+                    f"build window edges ts={cur_ts}",
+                    flush=True,
+                )
                 edges = ra.get_window_edges(
                     all_data[:, :4],
                     cur_ts,
@@ -329,30 +376,142 @@ def evaluate_events(
                     int(args.window),
                     first_test_query_ts=first_query_ts,
                 )
+                print(
+                    f"[TLogic-Fair] eval {split_name} process={process_id}: "
+                    f"window edges ready ts={cur_ts} relations={len(edges)} "
+                    f"elapsed={time.perf_counter() - t0:.1f}s",
+                    flush=True,
+                )
                 if measure_forward:
                     forward_time += time.perf_counter() - t0
 
             t0 = time.perf_counter()
-            predictions = candidate_scores_for_query(
-                args, query, rules_dict, edges, ra, create_scores_array, num_nodes
-            )
+            candidate_scores = candidate_scores_for_query(args, query, rules_dict, edges, ra)
             if measure_forward:
                 forward_time += time.perf_counter() - t0
 
             neg = neg_lists[i]
-            pos_scores[i, 0] = float(predictions[int(query[2])])
+            pos_scores[i, 0] = float(candidate_scores.get(int(query[2]), 0.0))
             if len(neg):
-                neg_scores[i, : len(neg)] = predictions[neg]
+                neg_scores[i, : len(neg)] = lookup_scores(candidate_scores, neg)
                 neg_mask[i, : len(neg)] = True
 
         add_metric_sums(sums, compute_ranking_metric_sums(pos_scores, neg_scores, neg_mask))
         sample_count += int(len(batch))
+        while sample_count >= next_progress or sample_count == len(events):
+            print(
+                f"[TLogic-Fair] eval {split_name} process={process_id}: "
+                f"completed {sample_count}/{len(events)} "
+                f"({100.0 * sample_count / max(1, len(events)):.1f}%) "
+                f"elapsed={time.perf_counter() - wall_t0:.1f}s",
+                flush=True,
+            )
+            if sample_count >= len(events):
+                break
+            next_progress += progress_step
+
+    return {
+        "sums": sums,
+        "forward_time_s": float(forward_time),
+        "sample_count": int(sample_count),
+        "wall_time_s": float(time.perf_counter() - wall_t0),
+    }
+
+
+def split_event_chunks(events, num_chunks):
+    if len(events) == 0:
+        return []
+    num_chunks = max(1, min(int(num_chunks), len(events)))
+    return [np.ascontiguousarray(chunk, dtype=np.int64) for chunk in np.array_split(events, num_chunks) if len(chunk)]
+
+
+def evaluate_events(
+    args,
+    events,
+    rules_dict,
+    learn_edges,
+    all_data,
+    num_nodes,
+    split_name,
+    measure_forward=False,
+):
+    sums = {}
+    if len(events) == 0:
+        metrics = finalize_metric_sums(sums)
+        metrics["mrr"] = metrics["mrr_strict"]
+        metrics["hit1"] = metrics["hit@1_strict"]
+        metrics["hit10"] = metrics["hit@10_strict"]
+        return metrics, {"forward_time_s": 0.0, "sample_count": 0, "wall_time_s": 0.0}
+
+    eval_t0 = time.perf_counter()
+    split_first_query_ts = int(events[0, 3])
+    chunks = split_event_chunks(np.ascontiguousarray(events, dtype=np.int64), int(args.num_processes))
+    print(
+        f"[TLogic-Fair] eval {split_name}: start queries={len(events)} "
+        f"chunks={len(chunks)} processes={args.num_processes} ns_q={args.ns_q}",
+        flush=True,
+    )
+
+    if int(args.num_processes) == 1 or len(chunks) == 1:
+        outputs = [
+            evaluate_event_chunk(
+                args,
+                chunks[0],
+                rules_dict,
+                learn_edges,
+                all_data,
+                num_nodes,
+                split_name,
+                measure_forward=measure_forward,
+                process_id=0,
+                split_first_query_ts=split_first_query_ts,
+            )
+        ]
+    else:
+        from joblib import Parallel, delayed
+
+        outputs = Parallel(n_jobs=int(args.num_processes))(
+            delayed(evaluate_event_chunk)(
+                args,
+                chunk,
+                rules_dict,
+                learn_edges,
+                all_data,
+                num_nodes,
+                split_name,
+                measure_forward=measure_forward,
+                process_id=i,
+                split_first_query_ts=split_first_query_ts,
+            )
+            for i, chunk in enumerate(chunks)
+        )
+
+    forward_time = 0.0
+    sample_count = 0
+    worker_wall_times = []
+    for output in outputs:
+        add_metric_sums(sums, output["sums"])
+        forward_time += float(output["forward_time_s"])
+        sample_count += int(output["sample_count"])
+        worker_wall_times.append(float(output["wall_time_s"]))
 
     metrics = finalize_metric_sums(sums)
     metrics["mrr"] = metrics["mrr_strict"]
     metrics["hit1"] = metrics["hit@1_strict"]
     metrics["hit10"] = metrics["hit@10_strict"]
-    return metrics, {"forward_time_s": float(forward_time), "sample_count": int(sample_count)}
+    wall_time = time.perf_counter() - eval_t0
+    print(
+        f"[TLogic-Fair] eval {split_name}: done mrr={metrics['mrr_strict']:.6f} "
+        f"hit1={metrics['hit@1_strict']:.6f} hit10={metrics['hit@10_strict']:.6f} "
+        f"samples={sample_count} wall={wall_time:.1f}s forward_sum={forward_time:.1f}s",
+        flush=True,
+    )
+    return metrics, {
+        "forward_time_s": float(forward_time),
+        "sample_count": int(sample_count),
+        "wall_time_s": float(wall_time),
+        "worker_wall_time_s": worker_wall_times,
+    }
 
 
 def run(args):
@@ -383,9 +542,16 @@ def run(args):
     num_rels = int(data["num_rels"])
 
     rules_dict, rule_path, train_time = learn_or_load_rules(args, train_data, num_rels, out_dir)
+    print(f"[TLogic-Fair] store train edges: start events={len(train_data)}", flush=True)
     t_edges = time.perf_counter()
     learn_edges = store_edges(train_data)
-    train_time += time.perf_counter() - t_edges
+    store_edges_time = time.perf_counter() - t_edges
+    train_time += store_edges_time
+    print(
+        f"[TLogic-Fair] store train edges: done relations={len(learn_edges)} "
+        f"elapsed={store_edges_time:.1f}s",
+        flush=True,
+    )
 
     print(
         f"[TLogic-Fair] rules={sum(len(v) for v in rules_dict.values())} "
@@ -440,6 +606,8 @@ def run(args):
         "test_forward_time_s": float(test_profile["forward_time_s"]),
         "test_inference_sample_count": int(test_profile["sample_count"]),
         "val_forward_time_s": float(val_profile["forward_time_s"]),
+        "val_profile": val_profile,
+        "test_profile": test_profile,
         "val_metrics": val_metrics,
         "test_metrics": test_metrics,
         "val_mrr": float(val_metrics["mrr_strict"]),
@@ -463,6 +631,7 @@ def run(args):
     print(
         f"[TLogic-Fair] train_time={train_time:.3f}s "
         f"test_forward_time={test_profile['forward_time_s']:.3f}s "
+        f"test_wall_time={test_profile.get('wall_time_s', 0.0):.3f}s "
         f"test_samples={test_profile['sample_count']} saved -> {out_dir}",
         flush=True,
     )

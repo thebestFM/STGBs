@@ -114,20 +114,38 @@ def time_value(t_norm, t_orig, source):
     return int(t_norm if source == "norm" else t_orig)
 
 
-def flatten_snapshots(snapshot_list, time_source="raw"):
+def flatten_snapshots(snapshot_list, time_source="raw", label="split"):
     chunks = []
-    for events, t_norm, t_orig in snapshot_list:
+    total = int(len(snapshot_list))
+    progress_step = max(1, int(np.ceil(total / 100.0))) if total else 1
+    next_progress = progress_step
+    t0 = time.perf_counter()
+    print(f"[TIDFormer-Fair] flatten {label}: start snapshots={total}", flush=True)
+    for idx, (events, t_norm, t_orig) in enumerate(snapshot_list, start=1):
         if len(events) == 0:
-            continue
-        t_model = time_value(t_norm, t_orig, time_source)
-        t_model_col = np.full((len(events), 1), int(t_model), dtype=np.int64)
-        raw_col = np.full((len(events), 1), int(t_orig), dtype=np.int64)
-        chunks.append(np.hstack((events.astype(np.int64, copy=False), t_model_col, raw_col)))
+            pass
+        else:
+            t_model = time_value(t_norm, t_orig, time_source)
+            t_model_col = np.full((len(events), 1), int(t_model), dtype=np.int64)
+            raw_col = np.full((len(events), 1), int(t_orig), dtype=np.int64)
+            chunks.append(np.hstack((events.astype(np.int64, copy=False), t_model_col, raw_col)))
+        while idx >= next_progress or idx == total:
+            print(
+                f"[TIDFormer-Fair] flatten {label}: {idx}/{total} "
+                f"({100.0 * idx / max(1, total):.1f}%) elapsed={time.perf_counter() - t0:.1f}s",
+                flush=True,
+            )
+            if idx >= total:
+                break
+            next_progress += progress_step
     if not chunks:
         return np.empty((0, 5), dtype=np.int64)
+    print(f"[TIDFormer-Fair] flatten {label}: stacking chunks={len(chunks)}", flush=True)
     arr = np.vstack(chunks).astype(np.int64, copy=False)
     if len(arr) > 1 and np.any(arr[1:, 3] < arr[:-1, 3]):
+        print(f"[TIDFormer-Fair] flatten {label}: sorting by model time", flush=True)
         arr = arr[np.argsort(arr[:, 3], kind="stable")]
+    print(f"[TIDFormer-Fair] flatten {label}: done events={len(arr)} elapsed={time.perf_counter() - t0:.1f}s", flush=True)
     return arr
 
 
@@ -167,20 +185,77 @@ def build_tidformer_data(tid, train_events, val_events, test_events, num_nodes):
     return node_raw_features, edge_rel_ids, full_data, train_data, val_data, test_data
 
 
-def get_neighbor_sampler(tid, data, strategy, time_scaling_factor, seed, num_nodes=None):
+def get_neighbor_sampler(tid, data, strategy, time_scaling_factor, seed, num_nodes=None, label=""):
     src_max = int(np.max(data.src_node_ids)) if len(data.src_node_ids) else 0
     dst_max = int(np.max(data.dst_node_ids)) if len(data.dst_node_ids) else 0
     max_node_id = max(src_max, dst_max, int(num_nodes or 0))
     adj_list = [[] for _ in range(max_node_id + 1)]
-    for src, dst, edge_id, ts in zip(data.src_node_ids, data.dst_node_ids, data.edge_ids, data.node_interact_times):
+    label = label or "sampler"
+    total_edges = int(len(data.src_node_ids))
+    progress_step = max(1, int(np.ceil(total_edges / 100.0))) if total_edges else 1
+    next_progress = progress_step
+    t0 = time.perf_counter()
+    print(
+        f"[TIDFormer-Fair] build {label}: start adjacency edges={total_edges} nodes={max_node_id + 1}",
+        flush=True,
+    )
+    for idx, (src, dst, edge_id, ts) in enumerate(
+        zip(data.src_node_ids, data.dst_node_ids, data.edge_ids, data.node_interact_times),
+        start=1,
+    ):
         adj_list[int(src)].append((int(dst), int(edge_id), float(ts)))
         adj_list[int(dst)].append((int(src), int(edge_id), float(ts)))
-    return tid.NeighborSampler(
-        adj_list=adj_list,
-        sample_neighbor_strategy=strategy,
-        time_scaling_factor=float(time_scaling_factor),
-        seed=seed,
+        while idx >= next_progress or idx == total_edges:
+            print(
+                f"[TIDFormer-Fair] build {label}: adjacency {idx}/{total_edges} "
+                f"({100.0 * idx / max(1, total_edges):.1f}%) elapsed={time.perf_counter() - t0:.1f}s",
+                flush=True,
+            )
+            if idx >= total_edges:
+                break
+            next_progress += progress_step
+
+    sampler = tid.NeighborSampler.__new__(tid.NeighborSampler)
+    sampler.sample_neighbor_strategy = strategy
+    sampler.seed = seed
+    if strategy == "time_interval_aware":
+        sampler.nodes_neighbor_sampled_probabilities = []
+        sampler.time_scaling_factor = float(time_scaling_factor)
+    sampler.nodes_neighbor_ids = []
+    sampler.nodes_edge_ids = []
+    sampler.nodes_neighbor_times = []
+    if seed is not None:
+        sampler.random_state = np.random.RandomState(seed)
+
+    total_nodes = len(adj_list)
+    progress_step = max(1, int(np.ceil(total_nodes / 100.0))) if total_nodes else 1
+    next_progress = progress_step
+    t_sort = time.perf_counter()
+    print(f"[TIDFormer-Fair] build {label}: start sorting nodes={total_nodes}", flush=True)
+    for node_idx, per_node_neighbors in enumerate(adj_list, start=1):
+        sorted_per_node_neighbors = sorted(per_node_neighbors, key=lambda x: x[2])
+        neighbor_times = np.array([x[2] for x in sorted_per_node_neighbors])
+        sampler.nodes_neighbor_ids.append(np.array([x[0] for x in sorted_per_node_neighbors]))
+        sampler.nodes_edge_ids.append(np.array([x[1] for x in sorted_per_node_neighbors]))
+        sampler.nodes_neighbor_times.append(neighbor_times)
+        if strategy == "time_interval_aware":
+            sampler.nodes_neighbor_sampled_probabilities.append(
+                tid.NeighborSampler.compute_sampled_probabilities(sampler, neighbor_times)
+            )
+        while node_idx >= next_progress or node_idx == total_nodes:
+            print(
+                f"[TIDFormer-Fair] build {label}: sorting {node_idx}/{total_nodes} "
+                f"({100.0 * node_idx / max(1, total_nodes):.1f}%) elapsed={time.perf_counter() - t_sort:.1f}s",
+                flush=True,
+            )
+            if node_idx >= total_nodes:
+                break
+            next_progress += progress_step
+    print(
+        f"[TIDFormer-Fair] build {label}: done total_elapsed={time.perf_counter() - t0:.1f}s",
+        flush=True,
     )
+    return sampler
 
 
 class RelationAwareTIDFormer(nn.Module):
@@ -220,6 +295,10 @@ class RelationAwareTIDFormer(nn.Module):
         self.device = device
         self.bie_feature_dim = int(bie_feature_dim)
         self.num_bidirectional = int(num_bidirectional)
+        self.use_neighbor_cache = False
+        self._neighbor_cache = {}
+        self._neighbor_cache_hits = 0
+        self._neighbor_cache_misses = 0
 
         self.relation_embedding = nn.Embedding(int(num_rels) + 1, self.rel_feat_dim, padding_idx=0)
         self.time_encoder = tid.CalendarTimeEncoder(
@@ -253,9 +332,26 @@ class RelationAwareTIDFormer(nn.Module):
 
     def set_neighbor_sampler(self, neighbor_sampler):
         self.neighbor_sampler = neighbor_sampler
+        self.clear_neighbor_cache()
         if self.neighbor_sampler.sample_neighbor_strategy in ["uniform", "time_interval_aware"]:
             assert self.neighbor_sampler.seed is not None
             self.neighbor_sampler.reset_random_state()
+
+    def clear_neighbor_cache(self):
+        self._neighbor_cache = {}
+        self._neighbor_cache_hits = 0
+        self._neighbor_cache_misses = 0
+
+    def set_neighbor_cache(self, enabled):
+        self.use_neighbor_cache = bool(enabled)
+        self.clear_neighbor_cache()
+
+    def neighbor_cache_stats(self):
+        return {
+            "neighbor_cache_size": int(len(self._neighbor_cache)),
+            "neighbor_cache_hits": int(self._neighbor_cache_hits),
+            "neighbor_cache_misses": int(self._neighbor_cache_misses),
+        }
 
     def query_relation_features(self, rel_ids):
         rel_ids = torch.as_tensor(rel_ids, dtype=torch.long, device=self.device)
@@ -280,16 +376,65 @@ class RelationAwareTIDFormer(nn.Module):
         trend_features[mask] = 0.0
         return node_features, edge_features, time_features, seasonal_features, trend_features
 
+    def get_first_order_historical_neighbors(self, node_ids, node_interact_times):
+        if not self.use_neighbor_cache:
+            return self.neighbor_sampler.get_first_order_historical_neighbors(
+                node_ids=node_ids,
+                node_interact_times=node_interact_times,
+                num_neighbors=self.num_neighbors,
+            )
+
+        node_ids = np.asarray(node_ids)
+        node_interact_times = np.asarray(node_interact_times)
+        neighbor_ids = np.zeros((len(node_ids), self.num_neighbors), dtype=np.longlong)
+        edge_ids = np.zeros((len(node_ids), self.num_neighbors), dtype=np.longlong)
+        neighbor_times = np.zeros((len(node_ids), self.num_neighbors), dtype=np.float32)
+        missing_keys = []
+        missing_positions = []
+        missing_key_to_index = {}
+
+        for i, (node_id, interact_time) in enumerate(zip(node_ids, node_interact_times)):
+            key = (int(node_id), float(interact_time))
+            cached = self._neighbor_cache.get(key)
+            if cached is not None:
+                self._neighbor_cache_hits += 1
+                neighbor_ids[i], edge_ids[i], neighbor_times[i] = cached
+            else:
+                self._neighbor_cache_misses += 1
+                missing_idx = missing_key_to_index.get(key)
+                if missing_idx is None:
+                    missing_idx = len(missing_keys)
+                    missing_key_to_index[key] = missing_idx
+                    missing_keys.append(key)
+                    missing_positions.append([])
+                missing_positions[missing_idx].append(i)
+
+        if missing_keys:
+            miss_nodes = np.asarray([key[0] for key in missing_keys], dtype=node_ids.dtype)
+            miss_times = np.asarray([key[1] for key in missing_keys], dtype=node_interact_times.dtype)
+            miss_neighbor_ids, miss_edge_ids, miss_neighbor_times = self.neighbor_sampler.get_first_order_historical_neighbors(
+                node_ids=miss_nodes,
+                node_interact_times=miss_times,
+                num_neighbors=self.num_neighbors,
+            )
+            for key, positions, n_ids, e_ids, n_times in zip(
+                missing_keys, missing_positions, miss_neighbor_ids, miss_edge_ids, miss_neighbor_times
+            ):
+                cached = (n_ids.copy(), e_ids.copy(), n_times.copy())
+                self._neighbor_cache[key] = cached
+                for pos in positions:
+                    neighbor_ids[pos], edge_ids[pos], neighbor_times[pos] = cached
+
+        return neighbor_ids, edge_ids, neighbor_times
+
     def compute_src_dst_node_temporal_embeddings(self, src_node_ids, dst_node_ids, node_interact_times):
-        src_neighbor_ids, src_edge_ids, src_neighbor_times = self.neighbor_sampler.get_first_order_historical_neighbors(
+        src_neighbor_ids, src_edge_ids, src_neighbor_times = self.get_first_order_historical_neighbors(
             node_ids=src_node_ids,
             node_interact_times=node_interact_times,
-            num_neighbors=self.num_neighbors,
         )
-        dst_neighbor_ids, dst_edge_ids, dst_neighbor_times = self.neighbor_sampler.get_first_order_historical_neighbors(
+        dst_neighbor_ids, dst_edge_ids, dst_neighbor_times = self.get_first_order_historical_neighbors(
             node_ids=dst_node_ids,
             node_interact_times=node_interact_times,
-            num_neighbors=self.num_neighbors,
         )
         src_bie, dst_bie = self.bie_encoder(
             src_node_ids=src_node_ids,
@@ -429,13 +574,18 @@ def build_model(args, tid, node_raw_features, edge_rel_ids, train_neighbor_sampl
     return RelationAwareTIDFormerModel(backbone, predictor).to(args.device)
 
 
-def train_one_epoch(args, model, train_data, train_loader, train_neg_sampler, optimizer, loss_func):
+def train_one_epoch(args, model, train_data, train_loader, train_neg_sampler, optimizer, loss_func, epoch=None):
     model.train()
     model.set_neighbor_sampler(args._train_neighbor_sampler)
     losses = []
     train_time = 0.0
+    num_batches = int(len(train_loader))
+    progress_step = max(1, int(np.ceil(num_batches / 100.0))) if num_batches else 1
+    next_progress = progress_step
+    wall_t0 = time.perf_counter()
+    epoch_label = f"epoch={epoch}" if epoch is not None else "epoch=?"
 
-    for train_indices in train_loader:
+    for batch_idx, train_indices in enumerate(train_loader, start=1):
         sync_device(args.device)
         t0 = time.perf_counter()
         idx = train_indices.numpy()
@@ -467,6 +617,16 @@ def train_one_epoch(args, model, train_data, train_loader, train_neg_sampler, op
         sync_device(args.device)
         train_time += time.perf_counter() - t0
         losses.append(float(loss.detach().cpu().item()))
+        while batch_idx >= next_progress or batch_idx == num_batches:
+            print(
+                f"[TIDFormer-Fair] train {epoch_label}: batch {batch_idx}/{num_batches} "
+                f"({100.0 * batch_idx / max(1, num_batches):.1f}%) "
+                f"loss={losses[-1]:.5f} elapsed={time.perf_counter() - wall_t0:.1f}s",
+                flush=True,
+            )
+            if batch_idx >= num_batches:
+                break
+            next_progress += progress_step
 
     return {"loss": float(np.mean(losses)) if losses else 0.0, "train_time_s": float(train_time)}
 
@@ -475,8 +635,9 @@ def train_one_epoch(args, model, train_data, train_loader, train_neg_sampler, op
 def score_pairs(args, model, src, dst, times, rel, measure_forward=False):
     scores = []
     forward_time = 0.0
-    for start in range(0, len(src), int(args.eval_pair_batch_size)):
-        end = start + int(args.eval_pair_batch_size)
+    pair_batch_size = 1 if bool(args.exact_eval) else int(args.eval_pair_batch_size)
+    for start in range(0, len(src), pair_batch_size):
+        end = start + pair_batch_size
         sync_device(args.device)
         t0 = time.perf_counter()
         prob = model.score_probabilities(src[start:end], dst[start:end], times[start:end], rel[start:end])
@@ -490,21 +651,43 @@ def score_pairs(args, model, src, dst, times, rel, measure_forward=False):
 
 
 @torch.no_grad()
-def evaluate_split(args, model, split_name, snapshot_list, measure_forward=False):
+def evaluate_split(args, model, split_name, snapshot_list, measure_forward=False, max_negatives=None, profile_name=None):
     model.eval()
     model.set_neighbor_sampler(args._full_neighbor_sampler)
     neg_sampler = args._negative_sampler
     sums = {}
     forward_time = 0.0
     sample_count = 0
+    neighbor_cache_hits = 0
+    neighbor_cache_misses = 0
+    max_neighbor_cache_size = 0
+    total_queries = int(sum(len(events) for events, _, _ in snapshot_list))
+    progress_step = max(1, int(np.ceil(total_queries / 100.0))) if total_queries else 1
+    next_progress = progress_step
+    eval_t0 = time.perf_counter()
+    label = profile_name or split_name
+    effective_max_negs = None if max_negatives is None or int(max_negatives) <= 0 else int(max_negatives)
 
+    print(
+        f"[TIDFormer-Fair] eval {label}: start queries={total_queries} "
+        f"ns_q={args.ns_q} max_negs={effective_max_negs or 'full'} "
+        f"eval_batch={args.eval_batch_size} pair_batch={1 if args.exact_eval else args.eval_pair_batch_size} "
+        f"neg_cols={1 if args.exact_eval else args.eval_neg_columns_per_call} exact_eval={args.exact_eval}",
+        flush=True,
+    )
+
+    model.backbone.set_neighbor_cache(bool(args.eval_neighbor_cache))
     for events, t_norm, raw_t in snapshot_list:
         if len(events) == 0:
             continue
+        model.backbone.clear_neighbor_cache()
         t_model = time_value(t_norm, raw_t, args.time_source)
         for batch, neg_arr, neg_mask in collect_eval_batch(events[:, :3], int(raw_t), neg_sampler, split_name, args.eval_batch_size):
             if len(batch) == 0:
                 continue
+            if effective_max_negs is not None and neg_arr.shape[1] > effective_max_negs:
+                neg_arr = neg_arr[:, :effective_max_negs]
+                neg_mask = neg_mask[:, :effective_max_negs]
             bsz, neg_width = neg_arr.shape
             src = batch[:, 0].astype(np.int64, copy=False) + 1
             dst = batch[:, 2].astype(np.int64, copy=False) + 1
@@ -516,8 +699,9 @@ def evaluate_split(args, model, split_name, snapshot_list, measure_forward=False
             pos_scores = pos_scores.reshape(-1, 1)
             neg_scores = np.zeros((bsz, neg_width), dtype=np.float32)
 
-            for col_start in range(0, neg_width, int(args.eval_neg_columns_per_call)):
-                col_end = min(neg_width, col_start + int(args.eval_neg_columns_per_call))
+            neg_columns_per_call = 1 if bool(args.exact_eval) else int(args.eval_neg_columns_per_call)
+            for col_start in range(0, neg_width, neg_columns_per_call):
+                col_end = min(neg_width, col_start + neg_columns_per_call)
                 sub_mask = neg_mask[:, col_start:col_end]
                 if not np.any(sub_mask):
                     continue
@@ -540,12 +724,47 @@ def evaluate_split(args, model, split_name, snapshot_list, measure_forward=False
 
             add_metric_sums(sums, compute_ranking_metric_sums(pos_scores, neg_scores, neg_mask))
             sample_count += int(bsz)
+            while sample_count >= next_progress or sample_count == total_queries:
+                elapsed = time.perf_counter() - eval_t0
+                pct = 100.0 * sample_count / max(1, total_queries)
+                print(
+                    f"[TIDFormer-Fair] eval {label}: completed {sample_count}/{total_queries} "
+                    f"({pct:.1f}%) elapsed={elapsed:.1f}s",
+                    flush=True,
+                )
+                if sample_count >= total_queries:
+                    break
+                next_progress += progress_step
+        cache_stats = model.backbone.neighbor_cache_stats()
+        neighbor_cache_hits += int(cache_stats["neighbor_cache_hits"])
+        neighbor_cache_misses += int(cache_stats["neighbor_cache_misses"])
+        max_neighbor_cache_size = max(max_neighbor_cache_size, int(cache_stats["neighbor_cache_size"]))
+    model.backbone.set_neighbor_cache(False)
 
     metrics = finalize_metric_sums(sums)
     metrics["mrr"] = metrics["mrr_strict"]
     metrics["hit1"] = metrics["hit@1_strict"]
     metrics["hit10"] = metrics["hit@10_strict"]
-    return metrics, {"forward_time_s": float(forward_time), "sample_count": int(sample_count)}
+    profile = {
+        "forward_time_s": float(forward_time),
+        "sample_count": int(sample_count),
+        "max_negatives": int(effective_max_negs) if effective_max_negs is not None else None,
+        "wall_time_s": float(time.perf_counter() - eval_t0),
+        "exact_eval": bool(args.exact_eval),
+        "eval_neighbor_cache": bool(args.eval_neighbor_cache),
+        "neighbor_cache_hits": int(neighbor_cache_hits),
+        "neighbor_cache_misses": int(neighbor_cache_misses),
+        "max_neighbor_cache_size": int(max_neighbor_cache_size),
+    }
+    print(
+        f"[TIDFormer-Fair] eval {label}: done mrr={metrics['mrr_strict']:.6f} "
+        f"hit1={metrics['hit@1_strict']:.6f} hit10={metrics['hit@10_strict']:.6f} "
+        f"wall={profile['wall_time_s']:.1f}s forward={forward_time:.1f}s "
+        f"neighbor_cache_hits={neighbor_cache_hits} misses={neighbor_cache_misses} "
+        f"max_cache={max_neighbor_cache_size}",
+        flush=True,
+    )
+    return metrics, profile
 
 
 def run(args):
@@ -574,11 +793,18 @@ def run(args):
     describe_loaded_data(data, prefix="[TIDFormer-Fair]")
     args._negative_sampler = data["negative_sampler"]
 
-    train_events = flatten_snapshots(data["train_list"], time_source=args.time_source)
-    val_events = flatten_snapshots(data["val_list"], time_source=args.time_source)
-    test_events = flatten_snapshots(data["test_list"], time_source=args.time_source)
+    train_events = flatten_snapshots(data["train_list"], time_source=args.time_source, label="train")
+    val_events = flatten_snapshots(data["val_list"], time_source=args.time_source, label="val")
+    test_events = flatten_snapshots(data["test_list"], time_source=args.time_source, label="test")
+    print("[TIDFormer-Fair] build tidformer data: start", flush=True)
+    t_data_build = time.perf_counter()
     node_raw_features, edge_rel_ids, full_data, train_data, _, _ = build_tidformer_data(
         tid, train_events, val_events, test_events, int(data["num_nodes"])
+    )
+    print(
+        f"[TIDFormer-Fair] build tidformer data: done total_events={len(full_data.src_node_ids)} "
+        f"elapsed={time.perf_counter() - t_data_build:.1f}s",
+        flush=True,
     )
 
     args._train_neighbor_sampler = get_neighbor_sampler(
@@ -588,6 +814,7 @@ def run(args):
         args.time_scaling_factor,
         seed=0,
         num_nodes=int(data["num_nodes"]),
+        label="train_neighbor_sampler",
     )
     args._full_neighbor_sampler = get_neighbor_sampler(
         tid,
@@ -596,6 +823,7 @@ def run(args):
         args.time_scaling_factor,
         seed=1,
         num_nodes=int(data["num_nodes"]),
+        label="full_neighbor_sampler",
     )
     train_neg_sampler = tid.NegativeEdgeSampler(
         src_node_ids=train_data.src_node_ids,
@@ -620,62 +848,94 @@ def run(args):
     print(
         f"[TIDFormer-Fair] model nodes={data['num_nodes']} rels={data['num_rels']} "
         f"internal_nodes={data['num_nodes'] + 1} rel_dim={args.relation_dim} "
-        f"model_dim={args.model_dim} device={args.device} time_source={args.time_source}",
+        f"model_dim={args.model_dim} device={args.device} time_source={args.time_source} "
+        f"evaluate_every={args.evaluate_every} intermediate_val_ns={args.intermediate_val_ns_q} "
+        f"exact_eval={args.exact_eval} eval_neighbor_cache={args.eval_neighbor_cache}",
         flush=True,
     )
 
     reset_cuda_peak(args.device)
-    checkpoint_path = osp.join(out_dir, "best_model.pt")
+    val_checkpoint_path = osp.join(out_dir, "best_val_model.pt")
+    loss_checkpoint_path = osp.join(out_dir, "best_train_loss_model.pt")
     best_val = -float("inf")
-    best_epoch = 0
+    best_val_epoch = 0
+    best_train_loss = float("inf")
+    best_train_loss_epoch = 0
     early_stopped = False
     early_stop_epoch = 0
     train_time_total = 0.0
     epoch_logs = []
 
     for epoch in range(1, int(args.num_epochs) + 1):
-        log = train_one_epoch(args, model, train_data, train_loader, train_neg_sampler, optimizer, loss_func)
+        log = train_one_epoch(args, model, train_data, train_loader, train_neg_sampler, optimizer, loss_func, epoch=epoch)
         train_time_total += float(log["train_time_s"])
         log["epoch"] = int(epoch)
-        do_val = epoch % int(args.evaluate_every) == 0
+        if float(log["loss"]) < best_train_loss - float(args.tolerance):
+            best_train_loss = float(log["loss"])
+            best_train_loss_epoch = int(epoch)
+            torch.save(
+                {"state_dict": model.state_dict(), "epoch": epoch, "train_loss": best_train_loss},
+                loss_checkpoint_path,
+            )
+        log["best_train_loss"] = float(best_train_loss)
+        log["epochs_since_best_train_loss"] = int(epoch - best_train_loss_epoch)
+
+        do_val = int(args.evaluate_every) > 0 and epoch % int(args.evaluate_every) == 0
         if do_val:
-            val_metrics, _ = evaluate_split(args, model, "val", data["val_list"], measure_forward=False)
+            val_metrics, val_profile = evaluate_split(
+                args,
+                model,
+                "val",
+                data["val_list"],
+                measure_forward=False,
+                max_negatives=int(args.intermediate_val_ns_q),
+                profile_name="val-intermediate",
+            )
             log["val_mrr_strict"] = float(val_metrics["mrr_strict"])
             log["val_hit@1_strict"] = float(val_metrics["hit@1_strict"])
             log["val_hit@10_strict"] = float(val_metrics["hit@10_strict"])
+            log["val_max_negatives"] = val_profile["max_negatives"]
             if val_metrics["mrr_strict"] > best_val + float(args.tolerance):
                 best_val = float(val_metrics["mrr_strict"])
-                best_epoch = int(epoch)
-                torch.save({"state_dict": model.state_dict(), "epoch": epoch, "val_metrics": val_metrics}, checkpoint_path)
-            log["epochs_since_best"] = int(epoch - best_epoch) if best_epoch else 0
+                best_val_epoch = int(epoch)
+                torch.save({"state_dict": model.state_dict(), "epoch": epoch, "val_metrics": val_metrics}, val_checkpoint_path)
+            log["epochs_since_best_val"] = int(epoch - best_val_epoch) if best_val_epoch else 0
         epoch_logs.append(log)
         print(
             f"[TIDFormer-Fair] epoch={epoch} loss={log['loss']:.5f} "
-            f"train_time={log['train_time_s']:.2f}s best_val_mrr={max(best_val, 0.0):.5f}",
+            f"train_time={log['train_time_s']:.2f}s "
+            f"best_train_loss={best_train_loss:.5f}@{best_train_loss_epoch} "
+            f"best_val_mrr={max(best_val, 0.0):.5f}",
             flush=True,
         )
-        if do_val and best_epoch and int(epoch - best_epoch) >= int(args.patience):
+        if best_train_loss_epoch and int(epoch - best_train_loss_epoch) >= int(args.patience):
             early_stopped = True
             early_stop_epoch = int(epoch)
             print(
-                f"[TIDFormer-Fair] early stop at epoch={epoch}: val_mrr did not improve for "
-                f"{epoch - best_epoch} epochs (patience={args.patience}, best_epoch={best_epoch})",
+                f"[TIDFormer-Fair] early stop at epoch={epoch}: train loss did not improve for "
+                f"{epoch - best_train_loss_epoch} epochs "
+                f"(patience={args.patience}, best_train_loss_epoch={best_train_loss_epoch})",
                 flush=True,
             )
             break
 
     train_peak = cuda_peak_allocated(args.device)
-    if osp.exists(checkpoint_path):
-        ckpt = torch.load(checkpoint_path, map_location=args.device)
+    selected_by = "val_mrr" if best_val_epoch and osp.exists(val_checkpoint_path) else "train_loss"
+    selected_path = val_checkpoint_path if selected_by == "val_mrr" else loss_checkpoint_path
+    if osp.exists(selected_path):
+        ckpt = torch.load(selected_path, map_location=args.device)
         model.load_state_dict(ckpt["state_dict"])
+        best_epoch = int(ckpt.get("epoch", best_val_epoch or best_train_loss_epoch))
     else:
         best_epoch = int(epoch_logs[-1]["epoch"]) if epoch_logs else 0
-        torch.save({"state_dict": model.state_dict(), "epoch": best_epoch, "val_metrics": {}}, checkpoint_path)
+        selected_by = "final"
+        torch.save({"state_dict": model.state_dict(), "epoch": best_epoch, "val_metrics": {}}, loss_checkpoint_path)
 
-    val_metrics, _ = evaluate_split(args, model, "val", data["val_list"], measure_forward=False)
+    val_metrics, val_profile = evaluate_split(args, model, "val", data["val_list"], measure_forward=False)
     reset_cuda_peak(args.device)
     test_metrics, test_profile = evaluate_split(args, model, "test", data["test_list"], measure_forward=True)
     eval_peak = cuda_peak_allocated(args.device)
+    reported_best_val = float(best_val) if np.isfinite(best_val) else float(val_metrics["mrr_strict"])
 
     metrics = {
         "format": "tidformer_fair_v1",
@@ -685,8 +945,12 @@ def run(args):
         "ns_seed": int(args.ns_seed),
         "train_predict_ratio": float(args.train_predict_ratio),
         "best_epoch": int(best_epoch),
-        "best_val_mrr": float(best_val),
-        "early_stop_metric": "val_mrr_strict",
+        "best_val_epoch": int(best_val_epoch),
+        "best_train_loss_epoch": int(best_train_loss_epoch),
+        "best_train_loss": float(best_train_loss),
+        "best_val_mrr": reported_best_val,
+        "selected_checkpoint_by": selected_by,
+        "early_stop_metric": "train_loss",
         "early_stopped": bool(early_stopped),
         "early_stop_epoch": int(early_stop_epoch),
         "patience": int(args.patience),
@@ -695,6 +959,8 @@ def run(args):
         "eval_peak_allocated_bytes": eval_peak,
         "test_forward_time_s": float(test_profile["forward_time_s"]),
         "test_inference_sample_count": int(test_profile["sample_count"]),
+        "val_profile": val_profile,
+        "test_profile": test_profile,
         "val_metrics": val_metrics,
         "test_metrics": test_metrics,
         "val_mrr": float(val_metrics["mrr_strict"]),
@@ -711,15 +977,16 @@ def run(args):
             "This fair adapter offsets node ids because official TIDFormer reserves 0 for padding, "
             "uses learnable relation embeddings for historical edge features, and conditions the "
             "final predictor on the current query relation. Final val/test ranking scores exactly "
-            "one positive plus the protocol negatives; default evaluation scores pairs one at a time "
-            "so TIDFormer's batch-level BIE bookkeeping cannot couple candidates within a query."
+            "one positive plus the protocol negatives. The fast default batches candidate pairs "
+            "using TIDFormer's official batch-style BIE; pass --exact-eval to score pairs one at "
+            "a time and avoid candidate coupling at much higher cost."
         ),
     }
     save_metrics(out_dir, metrics)
     print(
         f"[TIDFormer-Fair] final val_mrr={metrics['val_mrr']:.6f} "
         f"test_mrr={metrics['test_mrr']:.6f} test_hit1={metrics['test_hit1']:.6f} "
-        f"test_hit10={metrics['test_hit10']:.6f}",
+        f"test_hit10={metrics['test_hit10']:.6f} selected={selected_by}@epoch{best_epoch}",
         flush=True,
     )
     print(
@@ -745,10 +1012,14 @@ def parse_args():
 
     parser.add_argument("--batch_size", type=int, default=200)
     parser.add_argument("--eval_batch_size", type=int, default=1)
-    parser.add_argument("--eval_pair_batch_size", type=int, default=1)
-    parser.add_argument("--eval_neg_columns_per_call", type=int, default=1)
-    parser.add_argument("--num_epochs", type=int, default=100)
-    parser.add_argument("--evaluate-every", type=int, default=1)
+    parser.add_argument("--eval_pair_batch_size", type=int, default=256)
+    parser.add_argument("--eval_neg_columns_per_call", type=int, default=256)
+    parser.add_argument("--exact-eval", action="store_true", default=False)
+    parser.add_argument("--eval-neighbor-cache", action="store_true", default=True)
+    parser.add_argument("--no-eval-neighbor-cache", dest="eval_neighbor_cache", action="store_false")
+    parser.add_argument("--intermediate-val-ns-q", type=int, default=200)
+    parser.add_argument("--num_epochs", type=int, default=80)
+    parser.add_argument("--evaluate-every", type=int, default=10)
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--tolerance", type=float, default=1e-8)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
@@ -780,8 +1051,12 @@ def parse_args():
     for name in ("batch_size", "eval_batch_size", "eval_pair_batch_size", "eval_neg_columns_per_call"):
         if int(getattr(args, name)) <= 0:
             raise ValueError(f"--{name} must be positive")
-    if int(args.num_epochs) <= 0 or int(args.evaluate_every) <= 0 or int(args.patience) <= 0:
-        raise ValueError("--num_epochs, --evaluate-every and --patience must be positive")
+    if int(args.num_epochs) <= 0 or int(args.patience) <= 0:
+        raise ValueError("--num_epochs and --patience must be positive")
+    if int(args.evaluate_every) == 0 or int(args.evaluate_every) < -1:
+        raise ValueError("--evaluate-every must be -1 or a positive integer")
+    if int(args.intermediate_val_ns_q) < 0:
+        raise ValueError("--intermediate-val-ns-q must be non-negative")
     if int(args.num_neighbors) <= 0 or int(args.num_layers) <= 0:
         raise ValueError("--num_neighbors and --num_layers must be positive")
     if int(args.model_dim) <= 0 or int(args.relation_dim) <= 0:
