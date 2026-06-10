@@ -3,6 +3,7 @@ import os
 import os.path as osp
 import sys
 import time
+import types
 from types import SimpleNamespace
 
 import numpy as np
@@ -27,7 +28,7 @@ TGB1_DIR = osp.join(REPO_DIR, "TGB1")
 
 
 def import_tgb1():
-    """Import TGB1/DyGLib modules without letting their utils package shadow this repo."""
+    """Import TGB1/DyGLib modules without colliding with this repo's top-level utils.py."""
     if not osp.isdir(TGB1_DIR):
         raise FileNotFoundError(f"TGB1 directory not found: {TGB1_DIR}")
 
@@ -48,6 +49,17 @@ def import_tgb1():
         sys.path.insert(0, TGB1_DIR)
         for name in saved_modules:
             sys.modules.pop(name, None)
+
+        # TGB1 modules use absolute imports such as `from utils.utils import ...`
+        # and `from models.modules import ...`.  The current repo also has a
+        # top-level utils.py, so expose TGB1/utils and TGB1/models as temporary
+        # packages while importing the official modules.
+        utils_pkg = types.ModuleType("utils")
+        utils_pkg.__path__ = [osp.join(TGB1_DIR, "utils")]
+        models_pkg = types.ModuleType("models")
+        models_pkg.__path__ = [osp.join(TGB1_DIR, "models")]
+        sys.modules["utils"] = utils_pkg
+        sys.modules["models"] = models_pkg
 
         from models.MemoryModel import MemoryModel
         from models.GraphMixer import GraphMixer
