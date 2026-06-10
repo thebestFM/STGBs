@@ -288,20 +288,24 @@ def train_epoch(args, model, optimizer, train_subgraphs, df, edge_feats, sthn):
 
 
 def get_training_inputs(args, train_subgraphs, cur_df, edge_feats, cur_inds, ind, sthn):
-    from TGB2.modules.sthn import get_inputs_for_ind
+    subgraphs, _ = train_subgraphs
+    subgraph_data_list = subgraphs[ind]
+    batch_size = len(subgraph_data_list) // (int(args.extra_neg_samples) + 2)
 
-    return get_inputs_for_ind(
-        train_subgraphs,
-        "train",
-        int(args.extra_neg_samples),
-        int(args.neg_samples),
-        None,
-        edge_feats,
-        cur_df,
-        cur_inds,
-        ind,
-        args,
+    pos_src_inds = np.arange(batch_size, dtype=np.int32)
+    pos_dst_inds = np.arange(batch_size, dtype=np.int32) + batch_size
+    neg_dst_groups = np.random.randint(
+        low=2,
+        high=2 + int(args.extra_neg_samples),
+        size=batch_size * int(args.neg_samples),
     )
+    neg_offsets = np.tile(np.arange(batch_size, dtype=np.int32), int(args.neg_samples))
+    neg_dst_inds = batch_size * neg_dst_groups + neg_offsets
+    mini_batch_inds = np.concatenate([pos_src_inds, pos_dst_inds, neg_dst_inds]).astype(np.int32, copy=False)
+
+    selected_subgraphs = [subgraph_data_list[i] for i in mini_batch_inds]
+    inputs = make_subgraph_inputs(args, selected_subgraphs, edge_feats, sthn)
+    return inputs, None, cur_inds
 
 
 def scale_edts(edge_dts):
