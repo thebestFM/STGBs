@@ -42,6 +42,8 @@ def import_tgb1():
             "models.modules",
             "models.MemoryModel",
             "models.GraphMixer",
+            "models.TGAT",
+            "models.DyGFormer",
         )
     }
     missing = {name for name, value in saved_modules.items() if value is None}
@@ -63,6 +65,8 @@ def import_tgb1():
 
         from models.MemoryModel import MemoryModel
         from models.GraphMixer import GraphMixer
+        from models.TGAT import TGAT
+        from models.DyGFormer import DyGFormer
         from utils.utils import NeighborSampler
     finally:
         sys.path[:] = saved_path
@@ -75,6 +79,8 @@ def import_tgb1():
     return SimpleNamespace(
         MemoryModel=MemoryModel,
         GraphMixer=GraphMixer,
+        TGAT=TGAT,
+        DyGFormer=DyGFormer,
         NeighborSampler=NeighborSampler,
     )
 
@@ -254,13 +260,28 @@ def encode_edges(model, src, dst, times, edge_ids=None, positive=False, args=Non
             edges_are_positive=bool(positive),
             num_neighbors=int(args.num_neighbors),
         )
-    return model.backbone.compute_src_dst_node_temporal_embeddings(
-        src_node_ids=src,
-        dst_node_ids=dst,
-        node_interact_times=times,
-        num_neighbors=int(args.num_neighbors),
-        time_gap=int(args.time_gap),
-    )
+    if model.model_kind == "graphmixer":
+        return model.backbone.compute_src_dst_node_temporal_embeddings(
+            src_node_ids=src,
+            dst_node_ids=dst,
+            node_interact_times=times,
+            num_neighbors=int(args.num_neighbors),
+            time_gap=int(args.time_gap),
+        )
+    if model.model_kind == "tgat":
+        return model.backbone.compute_src_dst_node_temporal_embeddings(
+            src_node_ids=src,
+            dst_node_ids=dst,
+            node_interact_times=times,
+            num_neighbors=int(args.num_neighbors),
+        )
+    if model.model_kind == "dygformer":
+        return model.backbone.compute_src_dst_node_temporal_embeddings(
+            src_node_ids=src,
+            dst_node_ids=dst,
+            node_interact_times=times,
+        )
+    raise ValueError(f"unsupported model_kind: {model.model_kind}")
 
 
 def make_model(args, data, events, tgb1):
@@ -303,6 +324,31 @@ def make_model(args, data, events, tgb1):
             token_dim_expansion_factor=float(args.token_dim_expansion_factor),
             channel_dim_expansion_factor=float(args.channel_dim_expansion_factor),
             dropout=float(args.dropout),
+            device=str(device),
+        )
+    elif args.model_kind == "tgat":
+        backbone = tgb1.TGAT(
+            node_raw_features=node_raw_features,
+            edge_raw_features=edge_raw_features,
+            neighbor_sampler=empty_sampler,
+            time_feat_dim=int(args.time_feat_dim),
+            num_layers=int(args.num_layers),
+            num_heads=int(args.num_heads),
+            dropout=float(args.dropout),
+            device=str(device),
+        )
+    elif args.model_kind == "dygformer":
+        backbone = tgb1.DyGFormer(
+            node_raw_features=node_raw_features,
+            edge_raw_features=edge_raw_features,
+            neighbor_sampler=empty_sampler,
+            time_feat_dim=int(args.time_feat_dim),
+            channel_embedding_dim=int(args.channel_embedding_dim),
+            patch_size=int(args.patch_size),
+            num_layers=int(args.num_layers),
+            num_heads=int(args.num_heads),
+            dropout=float(args.dropout),
+            max_input_sequence_length=int(args.max_input_sequence_length),
             device=str(device),
         )
     else:
@@ -472,7 +518,12 @@ def evaluate_split(args, model, split_name, events, edge_ids, split_indices, ful
 
 
 def make_out_dir(args):
-    prefix = "results_tgn_fair" if args.model_kind == "tgn" else "results_graphmixer_fair"
+    prefix = {
+        "tgn": "results_tgn_fair",
+        "graphmixer": "results_graphmixer_fair",
+        "tgat": "results_tgat_fair",
+        "dygformer": "results_dygformer_fair",
+    }[args.model_kind]
     name = (
         f"nsq{args.ns_q}_ns{args.ns_seed}_tpr{args.train_predict_ratio:g}"
         f"_d{args.node_feat_dim}_td{args.time_feat_dim}_rd{args.rel_dim}"
@@ -506,10 +557,15 @@ def run_fair(args):
         load_eval_neg=True,
         ns_seed=args.ns_seed,
     )
-    prefix = "[TGN-Fair]" if args.model_kind == "tgn" else "[GraphMixer-Fair]"
+    prefix = {
+        "tgn": "[TGN-Fair]",
+        "graphmixer": "[GraphMixer-Fair]",
+        "tgat": "[TGAT-Fair]",
+        "dygformer": "[DyGFormer-Fair]",
+    }[args.model_kind]
     describe_loaded_data(data, prefix=prefix)
     if int(args.ns_q) <= 0:
-        raise ValueError("TGB1 fair TGN/GraphMixer require a fixed positive --ns_q")
+        raise ValueError("TGB1 fair models require a fixed positive --ns_q")
 
     events, edge_ids, splits = make_events(data)
     train_indices = splits["train"]
@@ -694,7 +750,8 @@ def run_fair(args):
             "link predictor. Training uses chronological random destination negatives from the same "
             "destination pool as the protocol. Final val/test score exactly one positive plus EAGLE "
             "protocol negatives and compute strict metrics. TGN memory is updated online with positive "
-            "edges; GraphMixer is stateless and uses temporal neighbor sampling."
+            "edges; GraphMixer, TGAT, and DyGFormer are stateless and use their original temporal "
+            "neighbor encoders."
         ),
     }
     save_metrics(out_dir, metrics)
@@ -714,7 +771,7 @@ def run_fair(args):
 
 
 def add_common_args(parser, model_kind):
-    parser.add_argument("--model_kind", type=str, default=model_kind, choices=("tgn", "graphmixer"))
+    parser.add_argument("--model_kind", type=str, default=model_kind, choices=("tgn", "graphmixer", "tgat", "dygformer"))
     parser.add_argument("--dataset", type=str, required=True, choices=eagle_utils.SUPPORTED_DATASETS)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--ns_q", type=int, default=1000)
@@ -743,12 +800,16 @@ def add_common_args(parser, model_kind):
     parser.add_argument("--sample_neighbor_strategy", type=str, default="recent", choices=("recent", "uniform", "time_interval_aware"))
     parser.add_argument("--time_scaling_factor", type=float, default=0.0)
 
-    if model_kind == "tgn":
+    if model_kind in ("tgn", "tgat", "dygformer"):
         parser.add_argument("--num_heads", type=int, default=2)
-    else:
+    if model_kind == "graphmixer":
         parser.add_argument("--time_gap", type=int, default=200)
         parser.add_argument("--token_dim_expansion_factor", type=float, default=0.5)
         parser.add_argument("--channel_dim_expansion_factor", type=float, default=2.0)
+    if model_kind == "dygformer":
+        parser.add_argument("--channel_embedding_dim", type=int, default=32)
+        parser.add_argument("--patch_size", type=int, default=2)
+        parser.add_argument("--max_input_sequence_length", type=int, default=64)
 
 
 def validate_common_args(args):
@@ -768,20 +829,29 @@ def validate_common_args(args):
         raise ValueError("--node_feat_dim, --time_feat_dim, and --rel_dim must be positive")
     if int(args.num_neighbors) <= 0:
         raise ValueError("--num_neighbors must be positive")
-    if args.model_kind == "tgn" and (int(args.node_feat_dim) + int(args.time_feat_dim)) % int(args.num_heads) != 0:
-        raise ValueError("For TGN attention, node_feat_dim + time_feat_dim must be divisible by --num_heads")
+    if args.model_kind in ("tgn", "tgat") and (int(args.node_feat_dim) + int(args.time_feat_dim)) % int(args.num_heads) != 0:
+        raise ValueError("For TGN/TGAT attention, node_feat_dim + time_feat_dim must be divisible by --num_heads")
     if args.model_kind == "graphmixer" and int(args.time_gap) <= 0:
         raise ValueError("--time_gap must be positive")
+    if args.model_kind == "dygformer":
+        if int(args.channel_embedding_dim) <= 0:
+            raise ValueError("--channel_embedding_dim must be positive")
+        if int(args.patch_size) <= 0:
+            raise ValueError("--patch_size must be positive")
+        if int(args.max_input_sequence_length) <= 1:
+            raise ValueError("--max_input_sequence_length must be greater than 1")
+        if (4 * int(args.channel_embedding_dim)) % int(args.num_heads) != 0:
+            raise ValueError("For DyGFormer, 4 * channel_embedding_dim must be divisible by --num_heads")
     return args
 
 
 def parse_args():
     pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--model_kind", type=str, default="tgn", choices=("tgn", "graphmixer"))
+    pre_parser.add_argument("--model_kind", type=str, default="tgn", choices=("tgn", "graphmixer", "tgat", "dygformer"))
     pre_args, _ = pre_parser.parse_known_args()
     model_kind = pre_args.model_kind
 
-    parser = argparse.ArgumentParser("Fair TGB1 TGN-r/GraphMixer-r trainer for EAGLE TKG/THG protocols.")
+    parser = argparse.ArgumentParser("Fair TGB1 TGN-r/GraphMixer-r/TGAT-r/DyGFormer-r trainer for EAGLE TKG/THG protocols.")
     add_common_args(parser, model_kind)
     args = parser.parse_args()
     return validate_common_args(args)
