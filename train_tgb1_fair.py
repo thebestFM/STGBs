@@ -63,7 +63,7 @@ def import_tgb1():
         sys.modules["utils"] = utils_pkg
         sys.modules["models"] = models_pkg
 
-        from models.MemoryModel import MemoryModel
+        from models.MemoryModel import MemoryModel, compute_src_dst_node_time_shifts
         from models.GraphMixer import GraphMixer
         from models.TGAT import TGAT
         from models.DyGFormer import DyGFormer
@@ -78,6 +78,7 @@ def import_tgb1():
 
     return SimpleNamespace(
         MemoryModel=MemoryModel,
+        compute_src_dst_node_time_shifts=compute_src_dst_node_time_shifts,
         GraphMixer=GraphMixer,
         TGAT=TGAT,
         DyGFormer=DyGFormer,
@@ -119,9 +120,11 @@ class TGB1RelationModel(nn.Module):
 
     @property
     def is_memory_model(self):
-        return self.model_kind == "tgn"
+        return self.model_kind in ("tgn", "jodie")
 
     def set_neighbor_sampler(self, sampler):
+        if self.model_kind == "jodie":
+            return
         self.backbone.set_neighbor_sampler(sampler)
 
     def reset_memory(self):
@@ -251,7 +254,7 @@ def sample_training_negatives(rng, dst_ids_shifted, pool_shifted):
 
 
 def encode_edges(model, src, dst, times, edge_ids=None, positive=False, args=None):
-    if model.model_kind == "tgn":
+    if model.model_kind in ("tgn", "jodie"):
         return model.backbone.compute_src_dst_node_temporal_embeddings(
             src_node_ids=src,
             dst_node_ids=dst,
@@ -311,6 +314,32 @@ def make_model(args, data, events, tgb1):
             num_layers=int(args.num_layers),
             num_heads=int(args.num_heads),
             dropout=float(args.dropout),
+            device=str(device),
+        )
+    elif args.model_kind == "jodie":
+        train_events = flatten_snapshots(data["train_list"])
+        if len(train_events):
+            src_shift = train_events[:, 0].astype(np.int64, copy=False) + 1
+            dst_shift = train_events[:, 2].astype(np.int64, copy=False) + 1
+            train_times = train_events[:, 3].astype(np.float32, copy=False)
+            src_mean, src_std, dst_mean, dst_std = tgb1.compute_src_dst_node_time_shifts(src_shift, dst_shift, train_times)
+            src_std = 1.0 if float(src_std) == 0.0 else float(src_std)
+            dst_std = 1.0 if float(dst_std) == 0.0 else float(dst_std)
+        else:
+            src_mean, src_std, dst_mean, dst_std = 0.0, 1.0, 0.0, 1.0
+        backbone = tgb1.MemoryModel(
+            node_raw_features=node_raw_features,
+            edge_raw_features=edge_raw_features,
+            neighbor_sampler=empty_sampler,
+            time_feat_dim=int(args.time_feat_dim),
+            model_name="JODIE",
+            num_layers=int(args.num_layers),
+            num_heads=int(getattr(args, "num_heads", 1)),
+            dropout=float(args.dropout),
+            src_node_mean_time_shift=float(src_mean),
+            src_node_std_time_shift=float(src_std),
+            dst_node_mean_time_shift_dst=float(dst_mean),
+            dst_node_std_time_shift=float(dst_std),
             device=str(device),
         )
     elif args.model_kind == "graphmixer":
@@ -520,6 +549,7 @@ def evaluate_split(args, model, split_name, events, edge_ids, split_indices, ful
 def make_out_dir(args):
     prefix = {
         "tgn": "results_tgn_fair",
+        "jodie": "results_jodie_fair",
         "graphmixer": "results_graphmixer_fair",
         "tgat": "results_tgat_fair",
         "dygformer": "results_dygformer_fair",
@@ -559,6 +589,7 @@ def run_fair(args):
     )
     prefix = {
         "tgn": "[TGN-Fair]",
+        "jodie": "[JODIE-Fair]",
         "graphmixer": "[GraphMixer-Fair]",
         "tgat": "[TGAT-Fair]",
         "dygformer": "[DyGFormer-Fair]",
@@ -750,8 +781,9 @@ def run_fair(args):
             "link predictor. Training uses chronological random destination negatives from the same "
             "destination pool as the protocol. Final val/test score exactly one positive plus EAGLE "
             "protocol negatives and compute strict metrics. TGN memory is updated online with positive "
-            "edges; GraphMixer, TGAT, and DyGFormer are stateless and use their original temporal "
-            "neighbor encoders."
+            "edges; JODIE memory is updated online with positive edges and uses its original time "
+            "projection embedding; GraphMixer, TGAT, and DyGFormer are stateless and use their original "
+            "temporal neighbor encoders."
         ),
     }
     save_metrics(out_dir, metrics)
@@ -771,7 +803,7 @@ def run_fair(args):
 
 
 def add_common_args(parser, model_kind):
-    parser.add_argument("--model_kind", type=str, default=model_kind, choices=("tgn", "graphmixer", "tgat", "dygformer"))
+    parser.add_argument("--model_kind", type=str, default=model_kind, choices=("tgn", "jodie", "graphmixer", "tgat", "dygformer"))
     parser.add_argument("--dataset", type=str, required=True, choices=eagle_utils.SUPPORTED_DATASETS)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--ns_q", type=int, default=1000)
@@ -795,8 +827,8 @@ def add_common_args(parser, model_kind):
     parser.add_argument("--rel_dim", type=int, default=64)
     parser.add_argument("--predictor_hidden_dim", type=int, default=128)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--num_layers", type=int, default=1 if model_kind == "tgn" else 2)
-    parser.add_argument("--num_neighbors", type=int, default=10 if model_kind == "tgn" else 20)
+    parser.add_argument("--num_layers", type=int, default=1 if model_kind in ("tgn", "jodie") else 2)
+    parser.add_argument("--num_neighbors", type=int, default=10 if model_kind in ("tgn", "jodie") else 20)
     parser.add_argument("--sample_neighbor_strategy", type=str, default="recent", choices=("recent", "uniform", "time_interval_aware"))
     parser.add_argument("--time_scaling_factor", type=float, default=0.0)
 
@@ -847,11 +879,11 @@ def validate_common_args(args):
 
 def parse_args():
     pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--model_kind", type=str, default="tgn", choices=("tgn", "graphmixer", "tgat", "dygformer"))
+    pre_parser.add_argument("--model_kind", type=str, default="tgn", choices=("tgn", "jodie", "graphmixer", "tgat", "dygformer"))
     pre_args, _ = pre_parser.parse_known_args()
     model_kind = pre_args.model_kind
 
-    parser = argparse.ArgumentParser("Fair TGB1 TGN-r/GraphMixer-r/TGAT-r/DyGFormer-r trainer for EAGLE TKG/THG protocols.")
+    parser = argparse.ArgumentParser("Fair TGB1 TGN-r/JODIE-r/GraphMixer-r/TGAT-r/DyGFormer-r trainer for EAGLE TKG/THG protocols.")
     add_common_args(parser, model_kind)
     args = parser.parse_args()
     return validate_common_args(args)
